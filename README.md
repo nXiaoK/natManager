@@ -1,8 +1,14 @@
 # Nat-Manager iptables简易端口转发管理系统
 
+> 此系统主要应用于PVE(**Proxmox Virtual Environment**)单IP应用情况下，实现IPV4及IPV6端口转发
+
 ![1](1.png)
 
 ![](2.png)
+
+> [!NOTE]
+>
+> 默认账号及密码为：admin
 
 **1. 确保系统已安装基础环境**
 
