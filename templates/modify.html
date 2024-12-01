@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}修改 NAT 转发规则{% endblock %}
+{% block content %}
+<div class="container mt-5">
+    <h1 class="mb-4">修改 NAT 转发规则</h1>
+    <form method="post">
+        <div class="form-group">
+            <label for="ip_version">IP 版本：</label>
+            <select name="ip_version" class="form-control" id="ip_version">
+                <option value="4" {% if rule.ip_version==4 %}selected{% endif %}>IPv4</option>
+                <option value="6" {% if rule.ip_version==6 %}selected{% endif %}>IPv6</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="protocol">协议：</label>
+            <select name="protocol" class="form-control" id="protocol">
+                <option value="tcp" {% if rule.protocol=='tcp' %}selected{% endif %}>TCP</option>
+                <option value="udp" {% if rule.protocol=='udp' %}selected{% endif %}>UDP</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="dport">目的端口：</label>
+            <input type="text" name="dport" class="form-control" id="dport" value="{{ rule.dport }}" required
+                pattern="\d+">
+        </div>
+        <div class="form-group">
+            <label for="to_ip">目标 IP：</label>
+            <input type="text" name="to_ip" class="form-control" id="to_ip" value="{{ rule.to_ip }}" required>
+        </div>
+        <div class="form-group">
+            <label for="to_port">目标端口：</label>
+            <input type="text" name="to_port" class="form-control" id="to_port" value="{{ rule.to_port }}" required
+                pattern="\d+">
+        </div>
+        <!-- 启用开关 -->
+        <div class="form-group form-check">
+            <input type="checkbox" name="enabled" class="form-check-input" id="enabled" {% if rule.enabled %}checked{%
+                endif %}>
+            <label class="form-check-label" for="enabled">启用此规则</label>
+        </div>
+        <button type="submit" class="btn btn-success">保存修改</button>
+        <a href="{{ url_for('index') }}" class="btn btn-secondary">取消</a>
+    </form>
+</div>
+{% endblock %}

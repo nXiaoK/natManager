@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}添加 NAT 转发规则{% endblock %}
+{% block content %}
+<div class="container mt-5">
+    <h1 class="mb-4">添加 NAT 转发规则</h1>
+    <form method="post">
+        <div class="form-group">
+            <label for="ip_version">IP 版本：</label>
+            <select name="ip_version" class="form-control" id="ip_version">
+                <option value="4">IPv4</option>
+                <option value="6">IPv6</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="protocol">协议：</label>
+            <select name="protocol" class="form-control" id="protocol">
+                <option value="tcp">TCP</option>
+                <option value="udp">UDP</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="dport">目的端口：</label>
+            <input type="text" name="dport" class="form-control" id="dport" required pattern="\d+">
+        </div>
+        <div class="form-group">
+            <label for="to_ip">目标 IP：</label>
+            <input type="text" name="to_ip" class="form-control" id="to_ip" required>
+        </div>
+        <div class="form-group">
+            <label for="to_port">目标端口：</label>
+            <input type="text" name="to_port" class="form-control" id="to_port" required pattern="\d+">
+        </div>
+        <!-- 可选：添加启用开关 -->
+        <div class="form-group form-check">
+            <input type="checkbox" name="enabled" class="form-check-input" id="enabled" checked>
+            <label class="form-check-label" for="enabled">启用此规则</label>
+        </div>
+        <button type="submit" class="btn btn-success">添加规则</button>
+        <a href="{{ url_for('index') }}" class="btn btn-secondary">返回</a>
+    </form>
+</div>
+{% endblock %}
