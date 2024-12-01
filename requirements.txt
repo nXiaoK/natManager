@@ -1,0 +1,4 @@
+Flask==3.0.0  # Flask主框架
+Flask-Login==0.6.2  # 用户登录管理
+Flask-SQLAlchemy==3.0.5  # 数据库ORM支持
+gunicorn==20.1.0  # 生产环境服务器
