@@ -2,9 +2,9 @@
 
 > 此系统主要应用于PVE(**Proxmox Virtual Environment**)单IP应用情况下，实现IPV4及IPV6端口转发
 
-![1](1.png)
+![1](imgSrc/1.png)
 
-![](2.png)
+![](imgSrc/2.png)
 
 > [!NOTE]
 >
@@ -23,15 +23,15 @@ sudo apt update && sudo apt upgrade -y
 **安装所需的软件包**
 
 ```shell
-sudo apt install python3 python3-pip python3-venv build-essential libssl-dev libffi-dev -y
+sudo apt install git python3 python3-pip python3-venv build-essential libssl-dev libffi-dev -y
 ```
 
 **2. 配置项目环境**
 
-**进入项目目录**
+**拉取项目**
 
-```
-cd nat_manager
+```shell
+git clone https://github.com/nXiaoK/natManager.git && cd natManager
 ```
 
 **创建虚拟环境**
