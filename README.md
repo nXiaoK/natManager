@@ -48,14 +48,6 @@ source venv/bin/activate
 
 **安装依赖项**
 
-确认您的项目中有 requirements.txt 文件，运行：
-
-```shell
-pip install -r requirements.txt
-```
-
-如果没有，请手动安装必要的依赖项，例如：
-
 ```shell
 pip install flask flask-login flask-sqlalchemy
 ```
@@ -93,7 +85,7 @@ sudo apt install nginx -y
 编辑 Nginx 配置文件：
 
 ```shell
-sudo nano /etc/nginx/sites-available/my_project
+sudo nano /etc/nginx/sites-available/natManager
 ```
 
 内容示例：
@@ -124,7 +116,7 @@ server {
 启用配置并重启 Nginx：
 
 ```shell
-sudo ln -s /etc/nginx/sites-available/my_project /etc/nginx/sites-enabled/
+sudo ln -s /etc/nginx/sites-available/natManager /etc/nginx/sites-enabled/
 
 sudo systemctl restart nginx
 ```
@@ -149,9 +141,9 @@ After=network.target
 [Service]
 User=root
 Group=root
-WorkingDirectory=/root/nat_manager
+WorkingDirectory=/root/natManager
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-ExecStart=/root/nat_manager/venv/bin/gunicorn -w 4 -b 0.0.0.0:5000 app:app
+ExecStart=/root/natManager/venv/bin/gunicorn -w 4 -b 0.0.0.0:5000 app:app
 
 [Install]
 WantedBy=multi-user.target
