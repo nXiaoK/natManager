@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}系统设置{% endblock %}
+{% block content %}
+<div class="container mt-5">
+    <h1 class="mb-4">系统设置</h1>
+    
+    <div class="card mb-4">
+        <div class="card-header bg-primary text-white">
+            <h5 class="mb-0">账号密码设置</h5>
+        </div>
+        <div class="card-body">
+            <form method="post">
+                <input type="hidden" name="action" value="update_credentials">
+                
+                <div class="form-group">
+                    <label for="current_password">当前密码：</label>
+                    <input type="password" name="current_password" class="form-control" id="current_password" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="new_username">新用户名：</label>
+                    <input type="text" name="new_username" class="form-control" id="new_username" 
+                           value="{{ config.username }}" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="new_password">新密码：</label>
+                    <input type="password" name="new_password" class="form-control" id="new_password" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="confirm_password">确认新密码：</label>
+                    <input type="password" name="confirm_password" class="form-control" id="confirm_password" required>
+                </div>
+                
+                <button type="submit" class="btn btn-success">保存账号设置</button>
+            </form>
+        </div>
+    </div>
+    
+    <div class="card mb-4">
+        <div class="card-header bg-info text-white">
+            <h5 class="mb-0">访问控制设置</h5>
+        </div>
+        <div class="card-body">
+            <div class="alert alert-secondary">
+                <strong>当前防火墙状态:</strong> <span class="badge {% if firewall_status == '允许公网访问' %}badge-success{% else %}badge-warning{% endif %}">{{ firewall_status }}</span>
+            </div>
+            
+            <form method="post">
+                <input type="hidden" name="action" value="update_access">
+                
+                <div class="form-group form-check">
+                    <input type="checkbox" name="allow_public" class="form-check-input" id="allow_public" 
+                           {% if config.allow_public_access %}checked{% endif %}>
+                    <label class="form-check-label" for="allow_public">允许公网访问</label>
+                </div>
+                
+                <div class="alert alert-warning">
+                    <strong>警告:</strong> 如果禁用公网访问，您只能通过内网IP访问此管理界面。系统会通过iptables防火墙规则限制访问。
+                    <hr>
+                    <p>当禁用公网访问时，系统将创建 <code>public_access.flag</code> 文件作为标记，并添加防火墙规则阻止公网访问。</p>
+                    <p>如果您无法访问界面，请登录服务器执行以下操作恢复公网访问：</p>
+                    <ol>
+                        <li>删除文件: <code>rm /root/natManager/public_access.flag</code></li>
+                        <li>删除防火墙规则: <code>sudo iptables -D INPUT -p tcp --dport 5000 -j DROP</code></li>
+                        <li>保存防火墙规则: <code>sudo iptables-save > /etc/iptables/rules.v4</code></li>
+                    </ol>
+                </div>
+                
+                <button type="submit" class="btn btn-info">保存访问设置</button>
+            </form>
+        </div>
+    </div>
+    
+    <div class="mt-3">
+        <a href="{{ url_for('index') }}" class="btn btn-secondary">返回</a>
+    </div>
+</div>
+{% endblock %} 

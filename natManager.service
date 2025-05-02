@@ -1,0 +1,13 @@
+[Unit]
+Description=NAT Manager Service
+After=network.target
+
+[Service]
+User=root
+Group=root
+WorkingDirectory=/root/natManager-main
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/root/natManager-main/gunicorn_starter.sh
+
+[Install]
+WantedBy=multi-user.target 

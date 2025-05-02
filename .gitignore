@@ -1,0 +1,12 @@
+# 编辑器配置
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+/instance/
+/venv/

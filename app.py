@@ -1,0 +1,1116 @@
+from flask import Flask, render_template, request, redirect, url_for, flash
+from flask_login import LoginManager, login_user, login_required, logout_user, UserMixin, current_user
+import subprocess
+import re
+from flask_sqlalchemy import SQLAlchemy
+import ipaddress
+import datetime
+from concurrent.futures import ThreadPoolExecutor
+import os
+import socket
+import atexit
+app = Flask(__name__)
+app.secret_key = 'fyvKab$*u7L0pn0'  # 请替换为您的实际密钥
+
+
+
+#net.ipv6.conf.all.forwarding=1 # 在 /etc/sysctl.conf 中添加
+#sudo sysctl -p #应用配置
+# sudo modprobe ip6table_nat  #加载必要的内核模块：确保 ip6table_nat 模块已加载。
+
+
+
+# 配置数据库
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///nat_rules.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
+
+class Target(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(50), nullable=False)  # 备注名称
+    ip = db.Column(db.String(39), nullable=False)    # IP地址
+    status = db.Column(db.String(10), default='未知') # 状态：在线/离线/未知
+    last_check = db.Column(db.DateTime)              # 最后检查时间
+
+class SystemConfig(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(50), nullable=False, default='admin')  # 用户名
+    password = db.Column(db.String(100), nullable=False, default='admin')  # 密码
+    allow_public_access = db.Column(db.Boolean, default=True)  # 是否允许公网访问
+    last_modified = db.Column(db.DateTime, default=datetime.datetime.now)  # 最后修改时间
+
+class NatRule(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    protocol = db.Column(db.String(10), default='tcp')
+    dport = db.Column(db.String(100), nullable=False)  # 修改为String(100)以支持多个端口
+    to_ip = db.Column(db.String(39), nullable=False)  # IPv6 地址可能更长
+    to_port = db.Column(db.String(100), nullable=False)  # 修改为String(100)以支持多个端口
+    enabled = db.Column(db.Boolean, default=True)
+    ip_version = db.Column(db.Integer, default=4)  # 新增字段，默认值为 4
+    target_id = db.Column(db.Integer, db.ForeignKey('target.id'), nullable=True)  # 关联目标地址
+    target = db.relationship('Target', backref=db.backref('nat_rules', lazy=True))
+
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login'
+
+@app.errorhandler(404)
+def page_not_found(e):
+    return render_template('404.html'), 404
+
+@app.errorhandler(500)
+def internal_server_error(e):
+    return render_template('500.html'), 500
+# 定义用户类
+class User(UserMixin):
+    def __init__(self, id, username):
+        self.id = id
+        self.username = username
+
+    def get_id(self):
+        return self.id
+
+# 用户加载回调
+@login_manager.user_loader
+def load_user(user_id):
+    if user_id == '1':
+        # 从配置获取用户名
+        config = SystemConfig.query.first()
+        if config:
+            return User(id='1', username=config.username)
+        return User(id='1', username='admin')  # 默认用户名
+    return None
+
+# 登录路由
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    # 如果用户已登录，直接重定向到主页
+    if current_user.is_authenticated:
+        return redirect(url_for('index'))
+        
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        
+        # 从数据库获取配置
+        config = SystemConfig.query.first()
+        if not config:
+            # 如果没有配置记录，使用默认值
+            if username == 'admin' and password == 'admin':
+                user = User(id='1', username='admin')
+                login_user(user)
+                return redirect(url_for('index'))
+        else:
+            # 使用配置中的用户名和密码
+            if username == config.username and password == config.password:
+                user = User(id='1', username=config.username)
+                login_user(user)
+                return redirect(url_for('index'))
+                
+        return render_template('login.html', error='用户名或密码错误')
+    
+    return render_template('login.html')
+
+# 登出路由
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for('login'))
+
+
+@app.route('/')
+@login_required
+def index():
+    rules = NatRule.query.all()
+    return render_template('index.html', rules=rules)
+
+# 目标地址管理相关路由
+@app.route('/targets')
+@login_required
+def list_targets():
+    targets = Target.query.all()
+    return render_template('targets.html', targets=targets)
+
+@app.route('/targets/add', methods=['GET', 'POST'])
+@login_required
+def add_target():
+    if request.method == 'POST':
+        name = request.form['name']
+        ip = request.form['ip']
+        
+        # 验证IP地址格式
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            flash('IP地址格式不正确！', 'danger')
+            return redirect(url_for('add_target'))
+        
+        # 创建目标地址对象
+        target = Target(name=name, ip=ip)
+        db.session.add(target)
+        db.session.commit()
+        
+        flash('目标地址添加成功！', 'success')
+        return redirect(url_for('list_targets'))
+    
+    return render_template('add_target.html')
+
+@app.route('/targets/modify/<int:id>', methods=['GET', 'POST'])
+@login_required
+def modify_target(id):
+    target = Target.query.get_or_404(id)
+    
+    if request.method == 'POST':
+        name = request.form['name']
+        ip = request.form['ip']
+        
+        # 验证IP地址格式
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            flash('IP地址格式不正确！', 'danger')
+            return redirect(url_for('modify_target', id=id))
+        
+        # 更新目标地址信息
+        target.name = name
+        target.ip = ip
+        db.session.commit()
+        
+        flash('目标地址修改成功！', 'success')
+        return redirect(url_for('list_targets'))
+    
+    return render_template('modify_target.html', target=target)
+
+@app.route('/targets/delete/<int:id>')
+@login_required
+def delete_target(id):
+    target = Target.query.get_or_404(id)
+    
+    # 检查是否有NAT规则使用此目标地址
+    rules_count = NatRule.query.filter_by(target_id=id).count()
+    if rules_count > 0:
+        flash('无法删除：此目标地址正在被 {} 个NAT规则使用！'.format(rules_count), 'danger')
+        return redirect(url_for('list_targets'))
+    
+    # 从数据库中删除记录
+    db.session.delete(target)
+    db.session.commit()
+    
+    flash('目标地址删除成功！', 'success')
+    return redirect(url_for('list_targets'))
+
+@app.route('/targets/check_status/<int:id>')
+@login_required
+def check_target_status(id):
+    target = Target.query.get_or_404(id)
+    
+    # 执行ping检查
+    cmd = ['ping', '-c', '1', '-W', '1', target.ip]
+    try:
+        subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+        target.status = '在线'
+    except subprocess.CalledProcessError:
+        target.status = '离线'
+    
+    target.last_check = datetime.datetime.now()
+    db.session.commit()
+    
+    flash('目标状态已更新！', 'success')
+    return redirect(url_for('list_targets'))
+
+@app.route('/targets/check_all_status')
+@login_required
+def check_all_target_status():
+    targets = Target.query.all()
+    
+    def check_status(target):
+        cmd = ['ping', '-c', '1', '-W', '1', target.ip]
+        try:
+            subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+            target.status = '在线'
+        except subprocess.CalledProcessError:
+            target.status = '离线'
+        target.last_check = datetime.datetime.now()
+        return target
+    
+    # 使用线程池并行检查多个目标状态
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        updated_targets = list(executor.map(check_status, targets))
+    
+    db.session.commit()
+    
+    flash('所有目标状态已更新！', 'success')
+    return redirect(url_for('list_targets'))
+
+# 获取当前 NAT 转发规则
+def get_nat_rules(ip_version=4):
+    if ip_version == 4:
+        iptables_cmd = 'iptables'
+    else:
+        iptables_cmd = 'ip6tables'
+
+    result = subprocess.check_output(['sudo', iptables_cmd, '-t', 'nat', '-L', 'PREROUTING', '-n', '-v', '--line-numbers'])
+    rules = parse_iptables_output(result.decode('utf-8'))
+    return rules
+
+# 解析 iptables 输出
+def parse_iptables_output(output):
+    lines = output.strip().split('\n')
+    rules = []
+    for line in lines[2:]:  # 跳过前两行标题
+        if not line.strip():
+            continue  # 跳过空行
+        parts = line.split()
+        if len(parts) >= 11:
+            rule = {
+                'num': parts[0],
+                'pkts': parts[1],
+                'bytes': parts[2],
+                'target': parts[3],
+                'prot': parts[4],
+                'opt': parts[5],
+                'in': parts[6],
+                'out': parts[7],
+                'source': parts[8],
+                'destination': parts[9],
+                'options': parts[10:]
+            }
+            # 提取 dpt 和 to-destination
+            dpt = ''
+            to_destination = ''
+            for item in rule['options']:
+                if item.startswith('dpt:'):
+                    dpt = item.split(':', 1)[1]
+                elif item.startswith('to:'):
+                    to_destination = item.split(':', 1)[1]
+            rule['dpt'] = dpt
+            rule['to'] = to_destination
+            rules.append(rule)
+    return rules
+
+
+@app.route('/add', methods=['GET', 'POST'])
+@login_required
+def add_rule():
+    if request.method == 'POST':
+        ip_version = int(request.form['ip_version'])
+        protocol = request.form['protocol']
+        dport = request.form['dport']
+        to_port = request.form['to_port']
+        enabled = 'enabled' in request.form  # 获取启用状态
+        
+        # 检查是否选择了目标地址
+        if 'target_id' in request.form and request.form['target_id']:
+            target_id = int(request.form['target_id'])
+            target = Target.query.get_or_404(target_id)
+            to_ip = target.ip
+        else:
+            target_id = None
+            to_ip = request.form['to_ip']
+            
+            # 验证 IP 地址格式
+            try:
+                if ip_version == 4:
+                    ipaddress.IPv4Address(to_ip)
+                elif ip_version == 6:
+                    ipaddress.IPv6Address(to_ip)
+                else:
+                    raise ValueError("无效的 IP 版本")
+            except ipaddress.AddressValueError:
+                flash('目标 IP 格式不正确！', 'danger')
+                return redirect(url_for('add_rule'))
+            except ValueError as ve:
+                flash(str(ve), 'danger')
+                return redirect(url_for('add_rule'))
+            
+            # 检查手动输入的IP是否已存在于目标地址列表中
+            existing_target = Target.query.filter_by(ip=to_ip).first()
+            if existing_target:
+                # 如果IP已存在，关联到现有目标
+                target_id = existing_target.id
+            else:
+                # 如果IP不存在，创建新的目标地址记录
+                new_target = Target(name="空", ip=to_ip)
+                db.session.add(new_target)
+                db.session.commit()
+                target_id = new_target.id
+                flash(f'已自动添加目标地址: {to_ip}', 'info')
+        
+        # 端口验证和处理
+        dports = [p.strip() for p in dport.split(',')]
+        to_ports = [p.strip() for p in to_port.split(',')]
+        
+        # 检查端口数量是否匹配
+        if len(dports) != len(to_ports):
+            flash('目的端口和目标端口的数量必须一致！', 'danger')
+            return redirect(url_for('add_rule'))
+        
+        # 验证端口格式
+        for p in dports + to_ports:
+            if not p.isdigit():
+                flash('端口号必须是数字！', 'danger')
+                return redirect(url_for('add_rule'))
+        
+        # 如果规则将被启用，检查端口冲突
+        if enabled:
+            has_conflict, conflict_rule = check_port_conflict(dports)
+            if has_conflict:
+                flash(f'端口 {dport} 已被规则 #{conflict_rule.id} 占用！请先停用该规则再重试。', 'danger')
+                return redirect(url_for('add_rule'))
+        
+        # 创建规则对象
+        rule = NatRule(
+            ip_version=ip_version,
+            protocol=protocol,
+            dport=dport,
+            to_ip=to_ip,
+            to_port=to_port,
+            enabled=enabled,
+            target_id=target_id
+        )
+        db.session.add(rule)
+        db.session.commit()
+
+        # 如果启用，则添加到 iptables/ip6tables
+        if rule.enabled:
+            add_multiple_rules_to_iptables(rule)
+
+        flash('规则添加成功！', 'success')
+        return redirect(url_for('index'))
+        
+    # GET请求，展示添加表单
+    targets = Target.query.all()
+    return render_template('add.html', targets=targets)
+
+@app.route('/delete/<int:id>')
+@login_required
+def delete_rule(id):
+    rule = NatRule.query.get_or_404(id)
+
+    # 从 iptables/ip6tables 中删除规则
+    if rule.enabled:
+        delete_multiple_rules_from_iptables(rule)
+
+    # 从数据库中删除记录
+    db.session.delete(rule)
+    db.session.commit()
+
+    flash('规则删除成功！', 'success')
+    return redirect(url_for('index'))
+
+@app.route('/modify/<int:id>', methods=['GET', 'POST'])
+@login_required
+def modify_rule(id):
+    rule = NatRule.query.get_or_404(id)
+    if request.method == 'POST':
+        ip_version = int(request.form['ip_version'])
+        protocol = request.form['protocol']
+        dport = request.form['dport']
+        to_port = request.form['to_port']
+        enabled = 'enabled' in request.form  # 获取启用状态
+        
+        # 检查是否选择了目标地址
+        if 'target_id' in request.form and request.form['target_id']:
+            target_id = int(request.form['target_id'])
+            target = Target.query.get_or_404(target_id)
+            to_ip = target.ip
+        else:
+            target_id = None
+            to_ip = request.form['to_ip']
+            
+            # 验证 IP 地址格式
+            try:
+                if ip_version == 4:
+                    ipaddress.IPv4Address(to_ip)
+                elif ip_version == 6:
+                    ipaddress.IPv6Address(to_ip)
+                else:
+                    raise ValueError("无效的 IP 版本")
+            except ipaddress.AddressValueError:
+                flash('目标 IP 格式不正确！', 'danger')
+                return redirect(url_for('modify_rule', id=id))
+            except ValueError as ve:
+                flash(str(ve), 'danger')
+                return redirect(url_for('modify_rule', id=id))
+                
+            # 检查手动输入的IP是否已存在于目标地址列表中
+            existing_target = Target.query.filter_by(ip=to_ip).first()
+            if existing_target:
+                # 如果IP已存在，关联到现有目标
+                target_id = existing_target.id
+            else:
+                # 如果IP不存在，创建新的目标地址记录
+                new_target = Target(name="空", ip=to_ip)
+                db.session.add(new_target)
+                db.session.commit()
+                target_id = new_target.id
+                flash(f'已自动添加目标地址: {to_ip}', 'info')
+        
+        # 端口验证和处理
+        dports = [p.strip() for p in dport.split(',')]
+        to_ports = [p.strip() for p in to_port.split(',')]
+        
+        # 检查端口数量是否匹配
+        if len(dports) != len(to_ports):
+            flash('目的端口和目标端口的数量必须一致！', 'danger')
+            return redirect(url_for('modify_rule', id=id))
+        
+        # 验证端口格式
+        for p in dports + to_ports:
+            if not p.isdigit():
+                flash('端口号必须是数字！', 'danger')
+                return redirect(url_for('modify_rule', id=id))
+
+        # 如果规则将被启用，且端口发生变化，检查端口冲突
+        old_dports = rule.dport.split(',')
+        ports_changed = set(dports) != set(old_dports)
+        
+        if enabled and (not rule.enabled or ports_changed):
+            has_conflict, conflict_rule = check_port_conflict(dports, rule_id=id)
+            if has_conflict:
+                flash(f'端口 {dport} 已被规则 #{conflict_rule.id} 占用！请先停用该规则再重试。', 'danger')
+                return redirect(url_for('modify_rule', id=id))
+
+        # 如果规则已启用，且参数发生变化，则从 iptables/ip6tables 中删除旧规则
+        if rule.enabled:
+            delete_multiple_rules_from_iptables(rule)
+
+        # 更新规则
+        rule.ip_version = ip_version
+        rule.protocol = protocol
+        rule.dport = dport
+        rule.to_ip = to_ip
+        rule.to_port = to_port
+        rule.enabled = enabled
+        rule.target_id = target_id
+        db.session.commit()
+
+        # 如果启用，则添加新规则到 iptables/ip6tables
+        if rule.enabled:
+            add_multiple_rules_to_iptables(rule)
+
+        flash('规则修改成功！', 'success')
+        return redirect(url_for('index'))
+        
+    # GET请求，展示修改表单
+    targets = Target.query.all()
+    return render_template('modify.html', rule=rule, targets=targets)
+
+#启用和停用规则
+@app.route('/toggle/<int:id>')
+@login_required
+def toggle_rule(id):
+    rule = NatRule.query.get_or_404(id)
+    if rule.enabled:
+        # 从 iptables/ip6tables 中删除规则
+        delete_multiple_rules_from_iptables(rule)
+        rule.enabled = False
+        db.session.commit()
+        flash('规则已停用！', 'success')
+    else:
+        # 检查端口冲突
+        dports = [p.strip() for p in rule.dport.split(',')]
+        has_conflict, conflict_rule = check_port_conflict(dports, rule_id=id)
+        if has_conflict:
+            flash(f'无法启用：端口 {rule.dport} 已被规则 #{conflict_rule.id} 占用！请先停用该规则再重试。', 'danger')
+            return redirect(url_for('index'))
+            
+        # 添加规则到 iptables/ip6tables
+        add_multiple_rules_to_iptables(rule)
+        rule.enabled = True
+        db.session.commit()
+        flash('规则已启用！', 'success')
+    
+    return redirect(url_for('index'))
+
+# 实现添加和删除 iptables 规则的函数
+def add_rule_to_iptables(rule):
+    if rule.ip_version == 4:
+        iptables_cmd = 'iptables'
+    else:
+        iptables_cmd = 'ip6tables'
+
+    cmd = [
+        'sudo', iptables_cmd, '-t', 'nat', '-A', 'PREROUTING',
+        '-p', rule.protocol, '--dport', rule.dport,
+        '-j', 'DNAT', '--to-destination', f'{rule.to_ip}:{rule.to_port}'
+    ]
+    subprocess.call(cmd)
+    subprocess.call(['sudo', iptables_cmd + '-save', '-f', f'/etc/iptables/rules.v{rule.ip_version}'])
+
+def delete_rule_from_iptables(rule):
+    if rule.ip_version == 4:
+        iptables_cmd = 'iptables'
+    else:
+        iptables_cmd = 'ip6tables'
+
+    cmd = [
+        'sudo', iptables_cmd, '-t', 'nat', '-D', 'PREROUTING',
+        '-p', rule.protocol, '--dport', rule.dport,
+        '-j', 'DNAT', '--to-destination', f'{rule.to_ip}:{rule.to_port}'
+    ]
+    subprocess.call(cmd)
+    subprocess.call(['sudo', iptables_cmd + '-save', '-f', f'/etc/iptables/rules.v{rule.ip_version}'])
+
+# 添加处理多端口规则的函数
+def add_multiple_rules_to_iptables(rule):
+    """添加支持多端口的NAT规则到iptables"""
+    dports = [p.strip() for p in rule.dport.split(',')]
+    to_ports = [p.strip() for p in rule.to_port.split(',')]
+    
+    # 如果端口数量不匹配，使用第一个目标端口作为所有目的端口的目标
+    if len(dports) != len(to_ports):
+        to_ports = [to_ports[0]] * len(dports)
+    
+    # 添加每一对端口的规则
+    for i, (dport, to_port) in enumerate(zip(dports, to_ports)):
+        if rule.ip_version == 4:
+            iptables_cmd = 'iptables'
+        else:
+            iptables_cmd = 'ip6tables'
+
+        cmd = [
+            'sudo', iptables_cmd, '-t', 'nat', '-A', 'PREROUTING',
+            '-p', rule.protocol, '--dport', dport,
+            '-j', 'DNAT', '--to-destination', f'{rule.to_ip}:{to_port}'
+        ]
+        subprocess.call(cmd)
+    
+    # 保存规则
+    subprocess.call(['sudo', iptables_cmd + '-save', '-f', f'/etc/iptables/rules.v{rule.ip_version}'])
+
+def delete_multiple_rules_from_iptables(rule):
+    """删除支持多端口的NAT规则从iptables"""
+    dports = [p.strip() for p in rule.dport.split(',')]
+    to_ports = [p.strip() for p in rule.to_port.split(',')]
+    
+    # 如果端口数量不匹配，使用第一个目标端口作为所有目的端口的目标
+    if len(dports) != len(to_ports):
+        to_ports = [to_ports[0]] * len(dports)
+    
+    # 删除每一对端口的规则
+    for i, (dport, to_port) in enumerate(zip(dports, to_ports)):
+        if rule.ip_version == 4:
+            iptables_cmd = 'iptables'
+        else:
+            iptables_cmd = 'ip6tables'
+
+        cmd = [
+            'sudo', iptables_cmd, '-t', 'nat', '-D', 'PREROUTING',
+            '-p', rule.protocol, '--dport', dport,
+            '-j', 'DNAT', '--to-destination', f'{rule.to_ip}:{to_port}'
+        ]
+        subprocess.call(cmd)
+    
+    # 保存规则
+    subprocess.call(['sudo', iptables_cmd + '-save', '-f', f'/etc/iptables/rules.v{rule.ip_version}'])
+
+def sync_rules():
+    # 检查数据库中是否已有规则
+    rule_count = NatRule.query.count()
+    if rule_count == 0:
+        # 数据库为空，第一次启动
+        # 获取当前 iptables 和 ip6tables 规则
+        iptables_rules = get_nat_rules(ip_version=4)
+        ip6tables_rules = get_nat_rules(ip_version=6)
+
+        # 处理 iptables 规则
+        for ipt_rule in iptables_rules:
+            # 同之前的方法，解析并存入数据库
+            # 设置 ip_version=4
+            save_rule_to_db(ipt_rule, ip_version=4)
+
+        # 处理 ip6tables 规则
+        for ipt_rule in ip6tables_rules:
+            # 同之前的方法，解析并存入数据库
+            # 设置 ip_version=6
+            save_rule_to_db(ipt_rule, ip_version=6)
+
+        db.session.commit()
+    else:
+        # 非第一次启动
+        # 清空当前的 iptables 和 ip6tables 规则
+        subprocess.call(['sudo', 'iptables', '-t', 'nat', '-F', 'PREROUTING'])
+        subprocess.call(['sudo', 'ip6tables', '-t', 'nat', '-F', 'PREROUTING'])
+        # 添加启用的规则
+        enabled_rules = NatRule.query.filter_by(enabled=True).all()
+        for rule in enabled_rules:
+            add_multiple_rules_to_iptables(rule)
+def save_rule_to_db(ipt_rule, ip_version):
+    protocol = ipt_rule.get('prot', 'tcp').lower()
+    dport = ipt_rule.get('dpt', '')
+    to_ip_port = ipt_rule.get('to', '')
+    if not dport or not to_ip_port:
+        return  # 跳过无法解析的规则
+
+    if ':' in to_ip_port:
+        to_ip, to_port = to_ip_port.rsplit(':', 1)
+    else:
+        to_ip = to_ip_port
+        to_port = ''  # 或者设置为默认值
+
+    # 创建 NatRule 对象
+    rule = NatRule(
+        ip_version=ip_version,
+        protocol=protocol,
+        dport=dport,
+        to_ip=to_ip,
+        to_port=to_port,
+        enabled=True  # 现有的规则默认为启用状态
+    )
+    db.session.add(rule)
+
+# 检查端口是否被已启用的规则占用
+def check_port_conflict(dport_list, rule_id=None):
+    """
+    检查目的端口是否被其他已启用的规则占用
+    :param dport_list: 端口列表
+    :param rule_id: 当前规则ID（修改规则时排除自身）
+    :return: 如果有冲突返回(True, 冲突规则)，否则返回(False, None)
+    """
+    for port in dport_list:
+        # 查询是否有启用状态的规则使用了该端口
+        query = NatRule.query.filter(
+            NatRule.enabled == True,  # 只检查启用状态的规则
+            NatRule.dport.like(f"%{port},%") |  # 匹配 "port,"
+            NatRule.dport.like(f"%,{port},%") |  # 匹配 ",port,"
+            NatRule.dport.like(f"%,{port}") |   # 匹配 ",port"
+            (NatRule.dport == port)             # 精确匹配
+        )
+        
+        # 如果是修改规则，排除当前规则自身
+        if rule_id is not None:
+            query = query.filter(NatRule.id != rule_id)
+        
+        conflict_rule = query.first()
+        if conflict_rule:
+            return True, conflict_rule
+    
+    return False, None
+
+def update_firewall_rules(allow_public=True):
+    """
+    更新防火墙规则以控制5000端口的公网访问
+    allow_public: 是否允许公网访问
+    """
+    try:
+        print(f"正在更新防火墙规则，{'允许' if allow_public else '禁止'}公网访问...")
+        
+        # 获取应用所在服务器的内网IP
+        hostname = socket.gethostname()
+        local_ip = socket.gethostbyname(hostname)
+        print(f"服务器主机名: {hostname}, 本地IP: {local_ip}")
+        
+        # 允许本地127.0.0.1访问
+        subprocess.run(['sudo', 'iptables', '-D', 'INPUT', '-p', 'tcp', '--dport', '5000', 
+                      '-s', '127.0.0.1', '-j', 'ACCEPT'], stderr=subprocess.DEVNULL)
+        subprocess.run(['sudo', 'iptables', '-I', 'INPUT', '1', '-p', 'tcp', '--dport', '5000', 
+                      '-s', '127.0.0.1', '-j', 'ACCEPT'])
+        print("已添加规则：允许本地127.0.0.1访问")
+        
+        # 允许同一局域网内访问
+        if local_ip and local_ip != '127.0.0.1':
+            network_prefix = '.'.join(local_ip.split('.')[:3]) + '.0/24'
+            subprocess.run(['sudo', 'iptables', '-D', 'INPUT', '-p', 'tcp', '--dport', '5000', 
+                          '-s', network_prefix, '-j', 'ACCEPT'], stderr=subprocess.DEVNULL)
+            subprocess.run(['sudo', 'iptables', '-I', 'INPUT', '2', '-p', 'tcp', '--dport', '5000', 
+                          '-s', network_prefix, '-j', 'ACCEPT'])
+            print(f"已添加规则：允许局域网 {network_prefix} 访问")
+        
+        # 检查是否存在DROP规则
+        check_drop = subprocess.run(['sudo', 'iptables', '-C', 'INPUT', '-p', 'tcp', '--dport', '5000', '-j', 'DROP'], 
+                                  stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        has_drop_rule = check_drop.returncode == 0
+        
+        # 清除现有的拒绝规则（如果有）
+        if has_drop_rule:
+            subprocess.run(['sudo', 'iptables', '-D', 'INPUT', '-p', 'tcp', '--dport', '5000', '-j', 'DROP'])
+            print("已删除现有的拒绝规则")
+        
+        # 如果不允许公网访问，添加拒绝规则
+        if not allow_public:
+            subprocess.run(['sudo', 'iptables', '-A', 'INPUT', '-p', 'tcp', '--dport', '5000', '-j', 'DROP'])
+            print("已添加规则：禁止其他IP访问")
+        else:
+            print("未添加拒绝规则，允许所有IP访问")
+            
+        # 保存iptables规则以便重启后仍然生效
+        save_result = subprocess.run(['sudo', 'sh', '-c', 'iptables-save > /etc/iptables/rules.v4'], 
+                                    stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        if save_result.returncode == 0:
+            print("防火墙规则已保存")
+        else:
+            print(f"保存防火墙规则失败: {save_result.stderr.decode('utf-8')}")
+        
+        # 显示当前iptables规则
+        print("当前INPUT链规则:")
+        iptables_list = subprocess.run(['sudo', 'iptables', '-L', 'INPUT', '-n', '--line-numbers'], 
+                                     stdout=subprocess.PIPE)
+        print(iptables_list.stdout.decode('utf-8'))
+        
+        return True, None
+    except Exception as e:
+        print(f"更新防火墙规则出错: {str(e)}")
+        return False, str(e)
+
+def check_public_access():
+    """检查是否允许公网访问"""
+    access_flag_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'public_access.flag')
+    
+    # 如果标记文件存在，表示禁止公网访问
+    if os.path.exists(access_flag_file):
+        return False
+    
+    # 检查数据库配置
+    with app.app_context():
+        try:
+            config = SystemConfig.query.first()
+            if config and not config.allow_public_access:
+                # 如果配置禁止公网访问，创建标记文件
+                with open(access_flag_file, 'w') as f:
+                    f.write('0')
+                return False
+            # 确保配置允许公网访问时，不存在标记文件
+            elif config and config.allow_public_access and os.path.exists(access_flag_file):
+                os.remove(access_flag_file)
+        except Exception:
+            # 如果数据库未初始化或出错，默认允许公网访问
+            # 但不自动创建或删除标记文件
+            pass
+    
+    return True
+
+@app.route('/settings', methods=['GET', 'POST'])
+@login_required
+def settings():
+    # 获取当前配置
+    config = SystemConfig.query.first()
+    if not config:
+        # 如果没有配置，创建默认配置
+        config = SystemConfig(username='admin', password='admin', allow_public_access=True)
+        db.session.add(config)
+        db.session.commit()
+    
+    # 公网访问标记文件路径
+    access_flag_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'public_access.flag')
+    
+    # 获取防火墙状态
+    firewall_status = "未知"
+    try:
+        # 使用os.popen获取命令输出
+        output = os.popen("sudo iptables -L INPUT -n").read()
+        if "DROP       tcp  --  0.0.0.0/0            0.0.0.0/0            tcp dpt:5000" in output:
+            firewall_status = "仅允许内网访问"
+        else:
+            firewall_status = "允许公网访问"
+    except:
+        firewall_status = "无法获取"
+    
+    if request.method == 'POST':
+        action = request.form.get('action', '')
+        
+        if action == 'update_credentials':
+            # 更新账号密码
+            current_password = request.form['current_password']
+            new_username = request.form['new_username']
+            new_password = request.form['new_password']
+            confirm_password = request.form['confirm_password']
+            
+            # 验证当前密码
+            if current_password != config.password:
+                flash('当前密码不正确！', 'danger')
+                return redirect(url_for('settings'))
+            
+            # 验证新密码
+            if new_password != confirm_password:
+                flash('新密码与确认密码不一致！', 'danger')
+                return redirect(url_for('settings'))
+            
+            # 更新账号密码
+            config.username = new_username
+            config.password = new_password
+            config.last_modified = datetime.datetime.now()
+            db.session.commit()
+            
+            flash('账号密码更新成功！请重新登录。', 'success')
+            return redirect(url_for('logout'))
+            
+        elif action == 'update_access':
+            # 更新公网访问设置
+            allow_public = 'allow_public' in request.form
+            
+            # 更新配置
+            config.allow_public_access = allow_public
+            config.last_modified = datetime.datetime.now()
+            db.session.commit()
+            
+            # 更新标记文件
+            if allow_public:
+                # 删除标记文件（如果存在）
+                try:
+                    if os.path.exists(access_flag_file):
+                        os.remove(access_flag_file)
+                except Exception as e:
+                    flash(f'更新访问设置时出错：{str(e)}', 'danger')
+                    return redirect(url_for('settings'))
+                
+                # 更新防火墙规则 - 使用os.system
+                try:
+                    print("允许公网访问 - 清除防火墙DROP规则")
+                    # 检查并移除DROP规则
+                    check_cmd = "sudo iptables -C INPUT -p tcp --dport 5000 -j DROP 2>/dev/null"
+                    if os.system(check_cmd) == 0:  # 返回0表示规则存在
+                        os.system("sudo iptables -D INPUT -p tcp --dport 5000 -j DROP")
+                        with open('/tmp/natmanager_startup.log', 'a') as f2:
+                            f2.write("已删除端口5000的DROP规则\n")
+                    else:
+                        with open('/tmp/natmanager_startup.log', 'a') as f2:
+                            f2.write("端口5000的DROP规则不存在，无需删除\n")
+                    
+                    os.system("sudo sh -c 'iptables-save > /etc/iptables/rules.v4'")
+                    flash('已允许公网访问！防火墙规则已更新。', 'success')
+                except Exception as e:
+                    flash(f'允许公网访问成功，但更新防火墙规则失败：{str(e)}。您可能需要手动更新防火墙规则。', 'warning')
+            else:
+                # 创建标记文件
+                with open(access_flag_file, 'w') as f:
+                    f.write('0')
+                
+                # 更新防火墙规则 - 使用os.system
+                try:
+                    print("禁止公网访问 - 添加防火墙DROP规则")
+                    # 添加本地和局域网访问规则
+                    hostname = socket.gethostname()
+                    local_ip = socket.gethostbyname(hostname)
+                    
+                    # 确保本地访问规则存在
+                    os.system("sudo iptables -D INPUT -p tcp --dport 5000 -s 127.0.0.1 -j ACCEPT")
+                    os.system("sudo iptables -I INPUT 1 -p tcp --dport 5000 -s 127.0.0.1 -j ACCEPT")
+                    
+                    # 确保局域网访问规则存在
+                    if local_ip and local_ip != '127.0.0.1':
+                        network_prefix = '.'.join(local_ip.split('.')[:3]) + '.0/24'
+                        os.system(f"sudo iptables -D INPUT -p tcp --dport 5000 -s {network_prefix} -j ACCEPT")
+                        os.system(f"sudo iptables -I INPUT 2 -p tcp --dport 5000 -s {network_prefix} -j ACCEPT")
+                    
+                    # 添加DROP规则
+                    os.system("sudo iptables -D INPUT -p tcp --dport 5000 -j DROP")
+                    os.system("sudo iptables -A INPUT -p tcp --dport 5000 -j DROP")
+                    
+                    # 添加本地和局域网访问规则
+                    hostname = socket.gethostname()
+                    local_ip = socket.gethostbyname(hostname)
+                    
+                    # 确保本地访问规则存在（先检查是否存在再删除）
+                    check_cmd_local = "sudo iptables -C INPUT -p tcp --dport 5000 -s 127.0.0.1 -j ACCEPT 2>/dev/null"
+                    if os.system(check_cmd_local) == 0:
+                        os.system("sudo iptables -D INPUT -p tcp --dport 5000 -s 127.0.0.1 -j ACCEPT")
+                    os.system("sudo iptables -I INPUT 1 -p tcp --dport 5000 -s 127.0.0.1 -j ACCEPT")
+                    
+                    # 确保局域网访问规则存在（先检查是否存在再删除）
+                    if local_ip and local_ip != '127.0.0.1':
+                        network_prefix = '.'.join(local_ip.split('.')[:3]) + '.0/24'
+                        check_cmd_lan = f"sudo iptables -C INPUT -p tcp --dport 5000 -s {network_prefix} -j ACCEPT 2>/dev/null"
+                        if os.system(check_cmd_lan) == 0:
+                            os.system(f"sudo iptables -D INPUT -p tcp --dport 5000 -s {network_prefix} -j ACCEPT")
+                        os.system(f"sudo iptables -I INPUT 2 -p tcp --dport 5000 -s {network_prefix} -j ACCEPT")
+                    
+                    # 添加DROP规则（先检查是否存在再删除）
+                    check_cmd_drop = "sudo iptables -C INPUT -p tcp --dport 5000 -j DROP 2>/dev/null"
+                    if os.system(check_cmd_drop) == 0:
+                        os.system("sudo iptables -D INPUT -p tcp --dport 5000 -j DROP")
+                    os.system("sudo iptables -A INPUT -p tcp --dport 5000 -j DROP")
+                    
+                    # 保存防火墙规则
+                    os.system("sudo sh -c 'iptables-save > /etc/iptables/rules.v4'")
+                    
+                    flash('已禁止公网访问！防火墙规则已更新。如果您无法访问界面，请删除服务器上的 public_access.flag 文件并运行命令: sudo iptables -D INPUT -p tcp --dport 5000 -j DROP', 'warning')
+                except Exception as e:
+                    flash(f'禁止公网访问成功，但更新防火墙规则失败：{str(e)}。您可能需要手动更新防火墙规则。', 'warning')
+            
+            return redirect(url_for('settings'))
+    
+    return render_template('settings.html', config=config, firewall_status=firewall_status)
+
+# 公网访问标记文件路径
+access_flag_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'public_access.flag')
+
+# 检查并清理防火墙规则（应用启动时执行）
+def check_and_clear_firewall():
+    flag_exists = os.path.exists(access_flag_file)
+    
+    # 创建启动日志
+    with open('/tmp/natmanager_startup.log', 'a') as f:
+        f.write(f"NAT Manager 启动检查于 {datetime.datetime.now()}\n")
+        f.write(f"限制文件存在: {'是' if flag_exists else '否'}\n")
+    
+    # 如果标记文件不存在，清理防火墙规则
+    if not flag_exists:
+        with open('/tmp/natmanager_startup.log', 'a') as f:
+            f.write("未检测到访问限制标记文件，尝试移除防火墙限制规则...\n")
+        
+        try:
+            # 检查并移除DROP规则
+            check_cmd = "sudo iptables -C INPUT -p tcp --dport 5000 -j DROP 2>/dev/null"
+            if os.system(check_cmd) == 0:  # 返回0表示规则存在
+                os.system("sudo iptables -D INPUT -p tcp --dport 5000 -j DROP")
+                with open('/tmp/natmanager_startup.log', 'a') as f:
+                    f.write("已删除端口5000的DROP规则\n")
+            else:
+                with open('/tmp/natmanager_startup.log', 'a') as f:
+                    f.write("端口5000的DROP规则不存在，无需删除\n")
+            
+            os.system("sudo sh -c 'iptables-save > /etc/iptables/rules.v4'")
+            
+            # 更新数据库配置
+            with app.app_context():
+                try:
+                    config = SystemConfig.query.first()
+                    if config and not config.allow_public_access:
+                        config.allow_public_access = True
+                        config.last_modified = datetime.datetime.now()
+                        db.session.commit()
+                        with open('/tmp/natmanager_startup.log', 'a') as f:
+                            f.write("已更新数据库配置为允许公网访问\n")
+                except Exception as e:
+                    with open('/tmp/natmanager_startup.log', 'a') as f:
+                        f.write(f"更新数据库配置出错: {str(e)}\n")
+        
+        except Exception as e:
+            with open('/tmp/natmanager_startup.log', 'a') as f:
+                f.write(f"移除防火墙规则时出错: {str(e)}\n")
+
+# 创建防火墙清理脚本
+def create_firewall_scripts():
+    try:
+        # 创建启动时执行防火墙清理的脚本文件
+        script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'clear_firewall.sh')
+        with open(script_path, 'w') as f:
+            f.write('#!/bin/bash\n')
+            f.write('# 此脚本用于启动时清除防火墙规则\n')
+            f.write('FLAG_FILE="' + access_flag_file + '"\n')
+            f.write('if [ ! -f "$FLAG_FILE" ]; then\n')
+            f.write('    echo "标记文件不存在，清除防火墙限制规则..."\n')
+            f.write('    sudo iptables -D INPUT -p tcp --dport 5000 -j DROP 2>/dev/null\n')
+            f.write('    sudo sh -c "iptables-save > /etc/iptables/rules.v4" 2>/dev/null\n')
+            f.write('    echo "防火墙规则已清除" > /tmp/firewall_clear.log\n')
+            f.write('    # 修改应用配置文件以允许公网访问\n')
+            f.write('    SQLITE_DB="' + os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nat_rules.db') + '"\n')
+            f.write('    if [ -f "$SQLITE_DB" ]; then\n')
+            f.write('        echo "更新数据库配置..." >> /tmp/firewall_clear.log\n')
+            f.write('        if ! command -v sqlite3 &> /dev/null; then\n')
+            f.write('            echo "安装sqlite3工具..." >> /tmp/firewall_clear.log\n')
+            f.write('            apt-get update && apt-get install -y sqlite3\n')
+            f.write('        fi\n')
+            f.write('        sqlite3 "$SQLITE_DB" "UPDATE system_config SET allow_public_access=1, last_modified=datetime(\'now\');" 2>/tmp/sqlite_error.log\n')
+            f.write('        echo "数据库更新完成" >> /tmp/firewall_clear.log\n')
+            f.write('    else\n')
+            f.write('        echo "数据库文件不存在" >> /tmp/firewall_clear.log\n')
+            f.write('    fi\n')
+            f.write('else\n')
+            f.write('    echo "标记文件存在，维持现有配置" > /tmp/firewall_clear.log\n')
+            f.write('fi\n')
+        os.chmod(script_path, 0o755)
+        
+        # 在systemd服务目录中创建一个启动前执行的脚本
+        systemd_path = '/etc/systemd/system/natmanager_firewall.service'
+        with open(systemd_path, 'w') as f:
+            f.write('[Unit]\n')
+            f.write('Description=Clear firewall rules for NAT Manager\n')
+            f.write('Before=natManager.service\n')
+            f.write('\n')
+            f.write('[Service]\n')
+            f.write('Type=oneshot\n')
+            f.write(f'ExecStart={script_path}\n')
+            f.write('RemainAfterExit=yes\n')
+            f.write('\n')
+            f.write('[Install]\n')
+            f.write('WantedBy=multi-user.target\n')
+        
+        os.system('sudo systemctl daemon-reload')
+        os.system('sudo systemctl enable natmanager_firewall.service')
+        
+        # 确保启动服务被正确设置
+        cron_path = '/etc/cron.d/natmanager_firewall'
+        with open(cron_path, 'w') as f:
+            f.write('@reboot root ' + script_path + ' >> /tmp/firewall_cron.log 2>&1\n')
+        os.chmod(cron_path, 0o644)
+        
+        with open('/tmp/natmanager_setup.log', 'w') as f:
+            f.write(f"防火墙清理脚本创建于: {script_path}\n")
+            f.write(f"系统服务创建于: {systemd_path}\n")
+            f.write(f"启动定时任务创建于: {cron_path}\n")
+            f.write("防火墙清理服务已启用\n")
+        
+        return True
+    except Exception as e:
+        with open('/tmp/natmanager_setup.log', 'w') as f:
+            f.write(f"创建防火墙清理脚本出错: {str(e)}\n")
+        return False
+
+# 应用退出时的清理函数
+def cleanup_on_exit():
+    with open('/tmp/natmanager_exit.log', 'w') as f:
+        f.write(f"应用退出于 {datetime.datetime.now()}\n")
+        f.write("检查防火墙规则状态\n")
+        
+        # 检查标记文件和当前防火墙规则
+        flag_exists = os.path.exists(access_flag_file)
+        f.write(f"标记文件存在: {'是' if flag_exists else '否'}\n")
+        
+        if not flag_exists:
+            # 检查并清除防火墙规则
+            check_cmd = "sudo iptables -C INPUT -p tcp --dport 5000 -j DROP 2>/dev/null"
+            if os.system(check_cmd) == 0:  # 返回0表示规则存在
+                os.system("sudo iptables -D INPUT -p tcp --dport 5000 -j DROP 2>/dev/null")
+                f.write("已删除端口5000的DROP规则\n")
+            else:
+                f.write("端口5000的DROP规则不存在，无需删除\n")
+            
+            os.system("sudo sh -c 'iptables-save > /etc/iptables/rules.v4' 2>/dev/null")
+            f.write("防火墙规则已保存\n")
+
+# 注册退出处理函数
+atexit.register(cleanup_on_exit)
+
+# 在应用启动时立即执行检查
+check_and_clear_firewall()
+
+# 定义初始化函数
+def initialize_app():
+    with open('/tmp/natmanager_init.log', 'w') as f:
+        f.write(f"初始化应用于 {datetime.datetime.now()}\n")
+    
+    check_and_clear_firewall()
+    create_firewall_scripts()
+    
+    with open('/tmp/natmanager_init.log', 'a') as f:
+        f.write("应用初始化完成\n")
+
+# 执行初始化
+with app.app_context():
+    initialize_app()
+
+if __name__ == '__main__':
+    # 简化主函数，前面已经执行了相关初始化
+    with app.app_context():
+        db.create_all()
+        
+        # 检查是否存在系统配置，如无则创建默认配置
+        config_count = SystemConfig.query.count()
+        if config_count == 0:
+            default_config = SystemConfig(
+                username='admin',
+                password='admin',
+                allow_public_access=True  # 默认允许公网访问
+            )
+            db.session.add(default_config)
+            db.session.commit()
+            print("创建默认配置: 允许公网访问")
+        
+        sync_rules()
+    
+    # 由于使用gunicorn和systemd，这里绑定地址不生效，但保留为本地开发使用
+    host = '0.0.0.0'  # 实际绑定地址由gunicorn控制
+    app.run(host=host, port=5000)

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}添加目标地址{% endblock %}
+{% block content %}
+<div class="container mt-5">
+    <h1 class="mb-4">添加目标地址</h1>
+    <form method="post">
+        <div class="form-group">
+            <label for="name">备注名称：</label>
+            <input type="text" name="name" class="form-control" id="name" required>
+        </div>
+        <div class="form-group">
+            <label for="ip">IP地址：</label>
+            <input type="text" name="ip" class="form-control" id="ip" required>
+        </div>
+        <button type="submit" class="btn btn-success">添加目标地址</button>
+        <a href="{{ url_for('list_targets') }}" class="btn btn-secondary">返回</a>
+    </form>
+</div>
+{% endblock %} 
